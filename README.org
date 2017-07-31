@@ -124,7 +124,7 @@ type AngineTunes struct {
 ** New an Agnine instance and start it
 First, you need to import angine into your project :-) then, 
    #+BEGIN_SRC 
-import "gitlab.zhonganonline.com/ann/angine"
+import "github.com/annchain/angine"
 
 ...
 
