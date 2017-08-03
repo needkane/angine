@@ -121,7 +121,7 @@ type AngineTunes struct {
 **** Conf contains anyconfig that you want to override the defaults. Say, you wanna use some cli args to override the default configs, this is the thing you should look into.
     After, you probably need to edit those files mannually to get exactly what you want. Everything in the files are straigt forward.
  
-** New an Agnine instance and start it
+** New an Angine instance and start it
 First, you need to import angine into your project :-) then, 
    #+BEGIN_SRC 
 import "github.com/annchain/angine"
