@@ -1,12 +1,12 @@
 [![version](https://img.shields.io/github/tag/needkane/angine.svg)](https://github.com/needkane/angine/releases/latest)
 [![API Reference](https://godoc.org/github.com/needkane/angine?status.svg)](https://godoc.org/github.com/tendermint/tendermint)
-[![license](https://img.shields.io/github/license/needkane/angine.svg)](https://github.com/needkane/angine/blob/master/LICENSE)
+[![license](https://img.shields.io/github/license/needkane/angine.svg)](https://github.com/needkane/angine/blob/codecov/LICENSE)
 [![](https://tokei.rs/b1/github/needkane/angine?category=lines)](https://github.com/needkane/angine)
 
 
 Branch    | Buid Status | Coverage | Report Card
 ----------|-------|----------|-------------
-master    | [![Build Status](https://travis-ci.org/needkane/angine.svg?branch=master)](https://travis-ci.org/needkane/angine)| [![codecov](http://codecov.io/gh/needkane/angine/branch/master/graph/badge.svg)](https://codecov.io/gh/needkane/angine) | [![Go Report Card](http://goreportcard.com/badge/github.com/needkane/angine/tree/master)](https://goreportcard.com/report/github.com/needkane/angine/tree/master)
+codecov    | [![Build Status](https://travis-ci.org/needkane/angine.svg?branch=codecov)](https://travis-ci.org/needkane/angine)| [![codecov](http://codecov.io/gh/needkane/angine/branch/codecov/graph/badge.svg)](https://codecov.io/gh/needkane/angine) | [![Go Report Card](http://goreportcard.com/badge/github.com/needkane/angine/tree/codecov)](https://goreportcard.com/report/github.com/needkane/angine/tree/codecov)
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
 <div id="text-table-of-contents">
