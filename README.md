@@ -1,6 +1,6 @@
 [![version](https://img.shields.io/github/tag/needkane/angine.svg)](https://github.com/needkane/angine/releases/latest)
 [![API Reference](https://godoc.org/github.com/needkane/angine?status.svg)](https://godoc.org/github.com/tendermint/tendermint)
-[![license](https://img.shields.io/github/license/needkane/angine.svg)](https://github.com/needkane/angine/blob/codecov/LICENSE)
+[![license](https://img.shields.io/github/license/annchain/angine.svg)](https://github.com/needkane/angine/blob/codecov/LICENSE)
 [![](https://tokei.rs/b1/github/needkane/angine?category=lines)](https://github.com/needkane/angine)
 
 
