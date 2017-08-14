@@ -21,7 +21,7 @@ import (
 	"github.com/annchain/angine/types"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tendermint/go-db"
+	"github.com/annchain/ann-module/lib/go-db"
 )
 
 func TestRefuseList(t *testing.T) {
