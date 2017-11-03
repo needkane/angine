@@ -21,12 +21,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/plugin"
 	"github.com/annchain/angine/types"
 	. "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 	dbm "github.com/annchain/ann-module/lib/go-db"
 	"github.com/annchain/ann-module/lib/go-wire"
 )
@@ -54,11 +54,12 @@ type State struct {
 	ChainID    string
 
 	// updated at end of ExecBlock
-	LastBlockHeight int // Genesis state has this set to 0.  So, Block(H=0) does not exist.
-	LastBlockID     types.BlockID
-	LastBlockTime   time.Time
-	Validators      *types.ValidatorSet
-	LastValidators  *types.ValidatorSet // block.LastCommit validated against this
+	LastBlockHeight    int // Genesis state has this set to 0.  So, Block(H=0) does not exist.
+	LastBlockID        types.BlockID
+	LastBlockTime      time.Time
+	Validators         *types.ValidatorSet
+	LastValidators     *types.ValidatorSet // block.LastCommit validated against this
+	LastNonEmptyHeight int                 // some where in the past, maybe jump through lots of blocks
 
 	// AppHash is updated after Commit
 	AppHash []byte
@@ -92,19 +93,20 @@ func loadState(db dbm.DB, key []byte) *State {
 // logger will be copied
 func (s *State) Copy() *State {
 	return &State{
-		db:              s.db,
-		querydb:         s.querydb,
-		logger:          s.logger,
-		GenesisDoc:      s.GenesisDoc,
-		ChainID:         s.ChainID,
-		LastBlockHeight: s.LastBlockHeight,
-		LastBlockID:     s.LastBlockID,
-		LastBlockTime:   s.LastBlockTime,
-		Validators:      s.Validators.Copy(),
-		LastValidators:  s.LastValidators.Copy(),
-		AppHash:         s.AppHash,
-		ReceiptsHash:    s.ReceiptsHash,
-		Plugins:         s.Plugins,
+		db:                 s.db,
+		querydb:            s.querydb,
+		logger:             s.logger,
+		GenesisDoc:         s.GenesisDoc,
+		ChainID:            s.ChainID,
+		LastBlockHeight:    s.LastBlockHeight,
+		LastBlockID:        s.LastBlockID,
+		LastBlockTime:      s.LastBlockTime,
+		Validators:         s.Validators.Copy(),
+		LastValidators:     s.LastValidators.Copy(),
+		AppHash:            s.AppHash,
+		ReceiptsHash:       s.ReceiptsHash,
+		Plugins:            s.Plugins,
+		LastNonEmptyHeight: s.LastNonEmptyHeight,
 	}
 }
 
@@ -144,7 +146,7 @@ func (s *State) LoadIntermediate() {
 		PanicSanity(Fmt("State mismatch for ReceiptsHash. Got %X, Expected %X", s2.ReceiptsHash, s.ReceiptsHash))
 	}
 
-	s.setBlockAndValidators(s2.LastBlockHeight, s2.LastBlockID, s2.LastBlockTime, s2.Validators.Copy(), s2.LastValidators.Copy())
+	s.setBlockAndValidators(s2.LastBlockHeight, s2.LastNonEmptyHeight, s2.LastBlockID, s2.LastBlockTime, s2.Validators.Copy(), s2.LastValidators.Copy())
 }
 
 func (s *State) Equals(s2 *State) bool {
@@ -164,14 +166,19 @@ func (s *State) Bytes() []byte {
 // Mutate state variables to match block and validators
 // after running EndBlock
 func (s *State) SetBlockAndValidators(header *types.Header, blockPartsHeader types.PartSetHeader, prevValSet, nextValSet *types.ValidatorSet) {
-	s.setBlockAndValidators(header.Height,
+	nonEmptyHeight := s.LastNonEmptyHeight
+	if header.NumTxs > 0 {
+		nonEmptyHeight = header.Height
+	}
+
+	s.setBlockAndValidators(header.Height, nonEmptyHeight,
 		types.BlockID{Hash: header.Hash(), PartsHeader: blockPartsHeader},
 		header.Time,
 		prevValSet, nextValSet)
 }
 
 func (s *State) setBlockAndValidators(
-	height int, blockID types.BlockID, blockTime time.Time,
+	height, nonEmptyHeight int, blockID types.BlockID, blockTime time.Time,
 	prevValSet, nextValSet *types.ValidatorSet) {
 
 	s.LastBlockHeight = height
@@ -179,6 +186,7 @@ func (s *State) setBlockAndValidators(
 	s.LastBlockTime = blockTime
 	s.Validators = nextValSet
 	s.LastValidators = prevValSet
+	s.LastNonEmptyHeight = nonEmptyHeight
 }
 
 func (s *State) SetLogger(logger *zap.Logger) {
@@ -203,10 +211,10 @@ func (s *State) GetChainID() string {
 
 // Load the most recent state from "state" db,
 // or create a new one (and save) from genesis.
-func GetState(config cfg.Config, stateDB dbm.DB) *State {
+func GetState(logger *zap.Logger, config *viper.Viper, stateDB dbm.DB) *State {
 	state := LoadState(stateDB)
 	if state == nil {
-		if state = MakeGenesisStateFromFile(stateDB, config.GetString("genesis_file")); state != nil {
+		if state = MakeGenesisStateFromFile(logger, stateDB, config.GetString("genesis_file")); state != nil {
 			state.Save()
 		}
 	}
@@ -216,16 +224,16 @@ func GetState(config cfg.Config, stateDB dbm.DB) *State {
 //-----------------------------------------------------------------------------
 // Genesis
 
-func MakeGenesisStateFromFile(db dbm.DB, genDocFile string) *State {
+func MakeGenesisStateFromFile(logger *zap.Logger, db dbm.DB, genDocFile string) *State {
 	genDocJSON, err := ioutil.ReadFile(genDocFile)
 	if err != nil {
 		return nil
 	}
 	genDoc := types.GenesisDocFromJSON(genDocJSON)
-	return MakeGenesisState(db, genDoc)
+	return MakeGenesisState(logger, db, genDoc)
 }
 
-func MakeGenesisState(db dbm.DB, genDoc *types.GenesisDoc) *State {
+func MakeGenesisState(logger *zap.Logger, db dbm.DB, genDoc *types.GenesisDoc) *State {
 	if len(genDoc.Validators) == 0 {
 		Exit(Fmt("The genesis file has no validators"))
 	}
@@ -246,7 +254,6 @@ func MakeGenesisState(db dbm.DB, genDoc *types.GenesisDoc) *State {
 			PubKey:      pubKey,
 			VotingPower: val.Amount,
 			IsCA:        val.IsCA,
-			RPCAddress:  val.RPCAddress,
 		}
 	}
 	validatorSet := types.NewValidatorSet(validators)
@@ -257,7 +264,7 @@ func MakeGenesisState(db dbm.DB, genDoc *types.GenesisDoc) *State {
 	for _, pn := range ps {
 		switch pn {
 		case "specialop":
-			plugins = append(plugins, plugin.NewSpecialop(&db))
+			plugins = append(plugins, plugin.NewSpecialop(logger, &db))
 		case "":
 			// no core_plugins is allowed, so just ignore it
 		default:
@@ -267,16 +274,17 @@ func MakeGenesisState(db dbm.DB, genDoc *types.GenesisDoc) *State {
 
 	// TODO: genDoc doesn't need to provide receiptsHash
 	return &State{
-		db:              db,
-		GenesisDoc:      genDoc,
-		ChainID:         genDoc.ChainID,
-		LastBlockHeight: 0,
-		LastBlockID:     types.BlockID{},
-		LastBlockTime:   genDoc.GenesisTime,
-		Validators:      validatorSet,
-		LastValidators:  lastValidatorSet,
-		AppHash:         genDoc.AppHash,
-		Plugins:         plugins,
+		db:                 db,
+		GenesisDoc:         genDoc,
+		ChainID:            genDoc.ChainID,
+		LastBlockHeight:    0,
+		LastBlockID:        types.BlockID{},
+		LastBlockTime:      genDoc.GenesisTime,
+		Validators:         validatorSet,
+		LastValidators:     lastValidatorSet,
+		AppHash:            genDoc.AppHash,
+		Plugins:            plugins,
+		LastNonEmptyHeight: 0,
 	}
 }
 
@@ -285,15 +293,16 @@ func MakeState(db dbm.DB) *State {
 	lastValidatorSet := types.NewValidatorSet(nil)
 
 	return &State{
-		db:              db,
-		GenesisDoc:      nil,
-		ChainID:         "",
-		LastBlockHeight: 0,
-		LastBlockID:     types.BlockID{},
-		LastBlockTime:   time.Now(),
-		Validators:      validatorSet,
-		LastValidators:  lastValidatorSet,
-		AppHash:         nil,
-		Plugins:         nil,
+		db:                 db,
+		GenesisDoc:         nil,
+		ChainID:            "",
+		LastBlockHeight:    0,
+		LastBlockID:        types.BlockID{},
+		LastBlockTime:      time.Now(),
+		Validators:         validatorSet,
+		LastValidators:     lastValidatorSet,
+		AppHash:            nil,
+		Plugins:            nil,
+		LastNonEmptyHeight: 0,
 	}
 }

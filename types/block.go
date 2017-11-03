@@ -41,18 +41,19 @@ func IsExtendedTx(tx []byte) bool {
 
 // TODO: version
 func MakeBlock(maker []byte, height int, chainID string, alltxs []Tx, commit *Commit,
-	prevBlockID BlockID, valHash, appHash, receiptsHash []byte, partSize int) (*Block, *PartSet) {
+	prevBlockID BlockID, valHash, appHash, receiptsHash []byte, partSize, nonEmptyHeight int) (*Block, *PartSet) {
 	block := &Block{
 		Header: &Header{
-			ChainID:        chainID,
-			Height:         height,
-			Time:           time.Now(),
-			NumTxs:         len(alltxs),
-			Maker:          maker,
-			LastBlockID:    prevBlockID,
-			ValidatorsHash: valHash,
-			AppHash:        appHash,      // state merkle root of txs from the previous block.
-			ReceiptsHash:   receiptsHash, // receipts hash from the previous block
+			ChainID:            chainID,
+			Height:             height,
+			Time:               time.Now(),
+			NumTxs:             len(alltxs),
+			Maker:              maker,
+			LastBlockID:        prevBlockID,
+			ValidatorsHash:     valHash,
+			AppHash:            appHash,      // state merkle root of txs from the previous block.
+			ReceiptsHash:       receiptsHash, // receipts hash from the previous block
+			LastNonEmptyHeight: nonEmptyHeight,
 		},
 		LastCommit: commit,
 		Data:       &Data{},
@@ -74,12 +75,15 @@ func MakeBlock(maker []byte, height int, chainID string, alltxs []Tx, commit *Co
 
 // Basic validation that doesn't involve state data.
 func (b *Block) ValidateBasic(chainID string, lastBlockHeight int, lastBlockID BlockID,
-	lastBlockTime time.Time, appHash, receiptsHash []byte) error {
+	lastBlockTime time.Time, appHash, receiptsHash []byte, nonEmptyHeight int) error {
 	if b.ChainID != chainID {
 		return errors.New(Fmt("Wrong Block.Header.ChainID. Expected %v, got %v", chainID, b.ChainID))
 	}
 	if b.Height != lastBlockHeight+1 {
 		return errors.New(Fmt("Wrong Block.Header.Height. Expected %v, got %v", lastBlockHeight+1, b.Height))
+	}
+	if b.LastNonEmptyHeight != nonEmptyHeight {
+		return errors.New(Fmt("Wrong Block.Header.LastNonEmptyHeight. Expected %v, got %v", nonEmptyHeight, b.LastNonEmptyHeight))
 	}
 	/*	TODO: Determine bounds for Time
 		See blockchain/reactor "stopSyncingDurationMinutes"
@@ -174,25 +178,25 @@ func (b *Block) StringIndented(indent string) string {
 func (b *Block) StringShort() string {
 	if b == nil {
 		return "nil-Block"
-	} else {
-		return fmt.Sprintf("Block#%X", b.Hash())
 	}
+	return fmt.Sprintf("Block#%X", b.Hash())
 }
 
 //-----------------------------------------------------------------------------
 
 type Header struct {
-	ChainID        string    `json:"chain_id"`
-	Height         int       `json:"height"`
-	Time           time.Time `json:"time"`
-	NumTxs         int       `json:"num_txs"` // XXX: Can we get rid of this?
-	Maker          []byte    `json:"maker"`
-	LastBlockID    BlockID   `json:"last_block_id"`
-	LastCommitHash []byte    `json:"last_commit_hash"` // commit from validators from the last block
-	DataHash       []byte    `json:"data_hash"`        // transactions
-	ValidatorsHash []byte    `json:"validators_hash"`  // validators for the current block
-	AppHash        []byte    `json:"app_hash"`         // state after txs from the previous block
-	ReceiptsHash   []byte    `json:"recepits_hash"`    // recepits_hash from previous block
+	ChainID            string    `json:"chain_id"`
+	Height             int       `json:"height"`
+	Time               time.Time `json:"time"`
+	NumTxs             int       `json:"num_txs"` // XXX: Can we get rid of this?
+	Maker              []byte    `json:"maker"`
+	LastBlockID        BlockID   `json:"last_block_id"`
+	LastCommitHash     []byte    `json:"last_commit_hash"` // commit from validators from the last block
+	DataHash           []byte    `json:"data_hash"`        // transactions
+	ValidatorsHash     []byte    `json:"validators_hash"`  // validators for the current block
+	AppHash            []byte    `json:"app_hash"`         // state after txs from the previous block
+	ReceiptsHash       []byte    `json:"recepits_hash"`    // recepits_hash from previous block
+	LastNonEmptyHeight int       `json:"last_non_empty_height"`
 }
 
 // NOTE: hash is nil if required fields are missing.
@@ -201,17 +205,18 @@ func (h *Header) Hash() []byte {
 		return nil
 	}
 	return merkle.SimpleHashFromMap(map[string]interface{}{
-		"ChainID":     h.ChainID,
-		"Height":      h.Height,
-		"Time":        h.Time,
-		"NumTxs":      h.NumTxs,
-		"maker":       h.Maker,
-		"LastBlockID": h.LastBlockID,
-		"LastCommit":  h.LastCommitHash,
-		"Data":        h.DataHash,
-		"Validators":  h.ValidatorsHash,
-		"App":         h.AppHash,
-		"Receipts":    h.ReceiptsHash,
+		"ChainID":            h.ChainID,
+		"Height":             h.Height,
+		"Time":               h.Time,
+		"NumTxs":             h.NumTxs,
+		"maker":              h.Maker,
+		"LastBlockID":        h.LastBlockID,
+		"LastCommit":         h.LastCommitHash,
+		"Data":               h.DataHash,
+		"Validators":         h.ValidatorsHash,
+		"App":                h.AppHash,
+		"Receipts":           h.ReceiptsHash,
+		"LastNonEmptyHeight": h.LastNonEmptyHeight,
 	})
 }
 
@@ -231,6 +236,7 @@ func (h *Header) StringIndented(indent string) string {
 %s  Validators:     %X
 %s  App:            %X
 %s  Receipts:       %X
+%s  LastNonEmptyHeight:       %v
 %s}#%X`,
 		indent, h.ChainID,
 		indent, h.Height,
@@ -243,7 +249,9 @@ func (h *Header) StringIndented(indent string) string {
 		indent, h.ValidatorsHash,
 		indent, h.AppHash,
 		indent, h.ReceiptsHash,
-		indent, h.Hash())
+		indent, h.LastNonEmptyHeight,
+		indent, h.Hash(),
+	)
 }
 
 //-------------------------------------

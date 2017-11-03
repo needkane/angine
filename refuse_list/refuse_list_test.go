@@ -20,8 +20,8 @@ import (
 
 	"github.com/annchain/angine/types"
 
-	"github.com/annchain/ann-module/lib/go-db"
 	"github.com/stretchr/testify/assert"
+	"github.com/tendermint/go-db"
 )
 
 func TestRefuseList(t *testing.T) {
@@ -30,7 +30,7 @@ func TestRefuseList(t *testing.T) {
 		os.RemoveAll("refuse_list.db")
 		refuseList.db.Close()
 	}()
-	var keyStr = "6FEBD39916627AA0CD7CFDA4A94586F3BA958078621E6E466488A423272B9700"
+	var keyStr = "7FEBD39916627AA0CD7CFDA4A94586F3BA958078621E6E466488A423272B9700"
 
 	pubKey, err := types.StringTo32byte(keyStr)
 	assert.Nil(t, err)

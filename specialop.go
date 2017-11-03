@@ -15,124 +15,169 @@
 package angine
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/plugin"
 	"github.com/annchain/angine/types"
 	"github.com/annchain/ann-module/lib/ed25519"
 	crypto "github.com/annchain/ann-module/lib/go-crypto"
-	"github.com/annchain/ann-module/lib/go-wire"
 )
 
+// ProcessSpecialOP is the ability of Angine.
+// It is called when a specialop tx comes in but before going into mempool.
+// We do a specialvotes collection here.
+// Only with 2/3+ voting power can the tx go into mempool.
 func (e *Angine) ProcessSpecialOP(tx []byte) error {
 	if !types.IsSpecialOP(tx) {
 		return fmt.Errorf("tx is not a specialop: %v", tx)
 	}
-	var cmd types.SpecialOPCmd
-	err := wire.ReadBinaryBytes(types.UnwrapTx(tx), &cmd)
-	if err != nil {
-		return err
+	cmd := &types.SpecialOPCmd{}
+	if err := json.Unmarshal(types.UnwrapTx(tx), cmd); err != nil {
+		return errors.Wrap(err, "fail parsing SpecialOPCmd")
 	}
-	cmd.Time = time.Now()
-	cmd.ExCmd = tx
+	signature := [64]byte{}
+	publicKey := [32]byte{}
+	copy(signature[:], cmd.Signature)
+	copy(publicKey[:], cmd.PubKey)
+	cmd.Signature = nil
+	signMessage, _ := json.Marshal(cmd)
+	if !ed25519.Verify(&publicKey, signMessage, &signature) {
+		return errors.Errorf("invalid signature")
+	}
+	cmd.Signature = signature[:]
+
 	_, validators := e.consensus.GetValidators()
-	myPubKey := e.privValidator.PubKey
+	myPubKey := e.privValidator.PubKey.(crypto.PubKeyEd25519)
 	var myVotingPower int64
 	for _, val := range validators {
-		if val.PubKey.KeyString() == myPubKey.KeyString() {
+		if val.PubKey.KeyString() == myPubKey.KeyString() && val.IsCA {
 			myVotingPower = val.VotingPower
 			break
 		}
 	}
 	if myVotingPower == 0 {
-		return fmt.Errorf("none validator can't do specialOP")
+		return fmt.Errorf("only CA can do specialOP")
 	}
-	if len(cmd.NodePubKey) == 0 {
-		cmd.NodePubKey = myPubKey.Bytes()
-	}
-	sigbytes, err := e.CheckSpecialOp(&cmd)
+
+	mySigbytes, err := e.SignSpecialOP(cmd)
 	if err != nil {
 		return err
 	}
+	// append our own signature
+	cmd.Sigs = append(cmd.Sigs, append(myPubKey[:], mySigbytes...))
 
-	cmd.NodePubKey = myPubKey.Bytes()
-	cmd.Sigs = append(cmd.Sigs, append(myPubKey.Bytes(), sigbytes...))
 	if len(validators) > 1 {
-		stuffedTx := wire.BinaryBytes(cmd)
-		if err := e.CollectSpecialVotes(&cmd, types.TagSpecialOPTx(stuffedTx)); err != nil {
+		if err := e.CollectSpecialVotes(cmd); err != nil {
+			e.logger.Error("collect special votes", zap.Error(err))
 			return err
 		}
 	}
-	sptx := types.WrapTx(types.SpecialTag, wire.BinaryBytes(cmd))
-	return e.BroadcastTx(sptx)
+
+	cmdBytes, _ := json.Marshal(cmd)
+	return e.BroadcastTx(types.WrapTx(types.SpecialTag, cmdBytes))
 }
 
-type voteResult struct {
-	Result    []byte
-	Validator *types.Validator
+// AppendSignatureToSpecialCmd appends signature onto cmd.Sigs
+func (e *Angine) AppendSignatureToSpecialCmd(cmd *types.SpecialOPCmd, pubkey crypto.PubKey, sig crypto.Signature) {
+	pk := pubkey.(crypto.PubKeyEd25519)
+	s := sig.(crypto.SignatureEd25519)
+	cmd.Sigs = append(cmd.Sigs, append(pk[:], s[:]...))
 }
 
-// CollectSpecialVotes returns nil means the vote passed
-func (e *Angine) CollectSpecialVotes(cmd *types.SpecialOPCmd, tx []byte) error {
+// CollectSpecialVotes collects special votes.
+// Communications are made on p2p port by a dedicated reactor.
+// Within tracerouter_msg_ttl timeout, see if we can get more than 2/3 voting power.
+func (e *Angine) CollectSpecialVotes(cmd *types.SpecialOPCmd) error {
 	var votedAny, major23VotingPower int64
-	totalVotingPower := e.consensus.GetTotalVotingPower()
+	cmdBytes, _ := json.Marshal(cmd)
 	_, validators := e.GetValidators()
-	votes := make(chan *voteResult, validators.Size())
-	defer close(votes)
-	pubkey := e.PrivValidator().PubKey
-	for _, validator := range validators.Validators {
-		if !validator.PubKey.Equals(pubkey) {
-			go func(data []byte, v *types.Validator, votes chan *voteResult) {
-				if e.getSpecialVote == nil {
-					votes <- nil
-					e.logger.Warn("incomplete specialop support: getSpecialVote is nil")
-					return
-				}
-				if res, err := e.getSpecialVote(data, v); err != nil {
-					e.logger.Info("get special vote error", zap.Error(err))
-					votes <- nil
-				} else {
-					votes <- &voteResult{
-						Result:    res,
-						Validator: v,
-					}
-				}
-			}(tx, validator, votes)
-		} else {
-			votedAny += validator.VotingPower
-			major23VotingPower += validator.VotingPower
-		}
-	}
+	candidatesNum := validators.Size() - 1
+	votesCh := make(chan []byte, candidatesNum)
+	defer close(votesCh)
+
+	// this timeout has nothing to do with consensus, it happens before the tx is accepted
+	spCtx, cancelCollect := context.WithTimeout(context.Background(), time.Duration(e.tune.Conf.GetInt("tracerouter_msg_ttl"))*time.Second)
+	e.traceRouter.Broadcast(spCtx, cmdBytes, votesCh)
+
+	_, myVal := validators.GetByAddress(e.PrivValidator().GetAddress())
+	votedAny = myVal.VotingPower
+	major23VotingPower = myVal.VotingPower
+	votedPubKeys := make(map[string]struct{})
+
 COLLECT:
 	for {
 		select {
-		case res := <-votes:
-			if res != nil {
-				votedAny += res.Validator.VotingPower
-				if err := CheckSpecialOPVoteSig(cmd, res.Validator.PubKey, res.Result); err != nil {
-					e.logger.Info("check speci vote signature error", zap.Error(err))
-				} else {
-					major23VotingPower += res.Validator.VotingPower
-					cmd.Sigs = append(cmd.Sigs, append(res.Validator.PubKey.Bytes(), res.Result...))
-				}
-			}
-			if major23VotingPower > totalVotingPower*2/3 || votedAny == totalVotingPower {
-				break COLLECT
-			}
-		case <-time.After(60 * time.Second):
+		case <-spCtx.Done():
+			cancelCollect()
+			e.logger.Warn("specialvote, collecting votes timeout")
 			break COLLECT
+		case v := <-votesCh:
+			voteresult := &types.SpecialVoteResult{}
+			if err := json.Unmarshal(v, voteresult); err != nil {
+				e.logger.Warn("specialvote", zap.Error(err))
+				continue
+			}
+			publicKey := [32]byte{}
+			signature := [64]byte{}
+			copy(signature[:], voteresult.Signature)
+			copy(publicKey[:], voteresult.PubKey)
+			voteresult.Signature = nil
+			signMessage, _ := json.Marshal(voteresult)
+			if !ed25519.Verify(&publicKey, signMessage, &signature) {
+				e.logger.Warn("specialvote, signature is invalid")
+				continue
+			}
+
+			pked := crypto.PubKeyEd25519(publicKey)
+			if !validators.HasAddress(pked.Address()) {
+				e.logger.Warn("specialvote, non-validator blended in", zap.String("pubkey", pked.KeyString()))
+				continue
+			}
+
+			if _, ok := votedPubKeys[pked.KeyString()]; ok {
+				e.logger.Warn("specialvote, adversory validator with double vote: %s", zap.String("pubkey", pked.KeyString()))
+				continue
+			}
+			votedPubKeys[pked.KeyString()] = struct{}{}
+
+			_, val := validators.GetByAddress(pked.Address())
+			voteSig := [64]byte{}
+			copy(voteSig[:], voteresult.Result)
+
+			votedAny += val.VotingPower
+			if ed25519.Verify(&publicKey, cmd.Msg, &voteSig) {
+				major23VotingPower += val.VotingPower
+				e.AppendSignatureToSpecialCmd(cmd, val.PubKey, crypto.SignatureEd25519(voteSig))
+			} else {
+				e.AppendSignatureToSpecialCmd(cmd, val.PubKey, crypto.SignatureEd25519{})
+			}
+			if major23VotingPower > (e.consensus.GetTotalVotingPower() * 2 / 3) {
+				cancelCollect()
+				return nil
+			}
+			if votedAny == e.consensus.GetTotalVotingPower() {
+				cancelCollect()
+				e.logger.Error("specialvote, insufficient votes")
+				return errors.Errorf("insufficient votes")
+			}
 		}
 	}
-	if major23VotingPower <= totalVotingPower*2/3 {
-		return fmt.Errorf("need more than 2/3 total voting power, total:%d, got:%d", totalVotingPower, major23VotingPower)
+
+	if major23VotingPower > (e.consensus.GetTotalVotingPower() * 2 / 3) {
+		return nil
 	}
-	return nil
+
+	return errors.Errorf("insufficient votes")
 }
 
-func (e *Angine) CheckSpecialOp(cmd *types.SpecialOPCmd) ([]byte, error) {
+//SignSpecialOP wraps around plugin.Specialop
+func (e *Angine) SignSpecialOP(cmd *types.SpecialOPCmd) ([]byte, error) {
 	switch cmd.CmdType {
 	case types.SpecialOP_ChangeValidator,
 		types.SpecialOP_Disconnect,
@@ -147,11 +192,11 @@ func (e *Angine) CheckSpecialOp(cmd *types.SpecialOPCmd) ([]byte, error) {
 			}
 		}
 		if spPlug != nil {
-			err, sig := spPlug.CheckSpecialOP(cmd)
-			if err == nil {
-				return sig.Bytes(), nil
+			sig, err := spPlug.SignSpecialOP(cmd)
+			if err != nil {
+				return nil, err
 			}
-			return nil, err
+			return sig[:], nil
 		}
 	default:
 		return nil, fmt.Errorf("unimplemented: %s", cmd.CmdType)
@@ -159,14 +204,41 @@ func (e *Angine) CheckSpecialOp(cmd *types.SpecialOPCmd) ([]byte, error) {
 	return nil, nil
 }
 
-func CheckSpecialOPVoteSig(cmd *types.SpecialOPCmd, pk crypto.PubKey, sigData []byte) error {
-	pk32 := [32]byte(pk.(crypto.PubKeyEd25519))
-	signature, err := crypto.SignatureFromBytes(sigData)
-	if err != nil {
-		return fmt.Errorf("fail to get signature from sigs")
+// SpecialOPResponseHandler defines what we do when we get a specialop request from a peer.
+// This is mainly used as a callback within TraceRouter.
+func (e *Angine) SpecialOPResponseHandler(data []byte) []byte {
+	cmd := &types.SpecialOPCmd{}
+	if err := json.Unmarshal(data, cmd); err != nil {
+		e.logger.Error("collect votes", zap.Error(err))
+		return nil
 	}
-	sig64 := [64]byte(signature.(crypto.SignatureEd25519))
-	if !ed25519.Verify(&pk32, cmd.ExCmd, &sig64) {
+	sig, err := e.SignSpecialOP(cmd)
+	if err != nil {
+		e.logger.Error("sign special error", zap.Error(err))
+		return nil
+	}
+	pub := e.PrivValidator().PubKey.(crypto.PubKeyEd25519)
+	res := &types.SpecialVoteResult{
+		Result: sig,
+		PubKey: pub[:],
+	}
+	resBytes, _ := json.Marshal(res)
+	signature := e.PrivValidator().Sign(resBytes).(crypto.SignatureEd25519)
+	res.Signature = signature[:]
+	resBytes, _ = json.Marshal(res)
+
+	return resBytes
+}
+
+// CheckSpecialOPVoteSig just wraps the action on how to check the votes we got.
+func CheckSpecialOPVoteSig(cmd *types.SpecialOPCmd, pk crypto.PubKey, sigData []byte) error {
+	if len(sigData) != 64 {
+		return errors.Errorf("sigData shoud be 64-byte long, got %d", len(sigData))
+	}
+	pk32 := [32]byte(pk.(crypto.PubKeyEd25519))
+	sig64 := [64]byte{}
+	copy(sig64[:], sigData)
+	if !ed25519.Verify(&pk32, cmd.Msg, &sig64) {
 		return fmt.Errorf("signature verification failed: %v", pk32)
 	}
 

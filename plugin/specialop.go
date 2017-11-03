@@ -16,8 +16,11 @@ package plugin
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+
+	"go.uber.org/zap"
 
 	"github.com/annchain/angine/refuse_list"
 	"github.com/annchain/angine/types"
@@ -25,7 +28,6 @@ import (
 	"github.com/annchain/ann-module/lib/go-crypto"
 	"github.com/annchain/ann-module/lib/go-db"
 	"github.com/annchain/ann-module/lib/go-p2p"
-	"github.com/annchain/ann-module/lib/go-wire"
 )
 
 type Specialop struct {
@@ -38,18 +40,18 @@ type Specialop struct {
 	sw         *p2p.Switch
 	privkey    crypto.PrivKeyEd25519
 	db         *db.DB
-
+	logger     *zap.Logger
 	refuselist *refuse_list.RefuseList
 }
 
-func NewSpecialop(statedb *db.DB) *Specialop {
+func NewSpecialop(logger *zap.Logger, statedb *db.DB) *Specialop {
 	s := Specialop{
 		ChangedValidators: make([]*types.ValidatorAttr, 0),
 		DisconnectedPeers: make([]*p2p.Peer, 0),
 		AddRefuseKeys:     make([][32]byte, 0),
 		DeleteRefuseKeys:  make([][32]byte, 0),
-
-		db: statedb,
+		logger:            logger,
+		db:                statedb,
 	}
 
 	return &s
@@ -66,9 +68,8 @@ func (s *Specialop) CheckTx(tx []byte) (bool, error) {
 	if !types.IsSpecialOP(tx) {
 		return true, nil
 	}
-	var cmd types.SpecialOPCmd
-	err := wire.ReadBinaryBytes(types.UnwrapTx(tx), &cmd)
-	if err != nil || cmd.CmdCode != types.SpecialOP {
+	cmd := &types.SpecialOPCmd{}
+	if err := json.Unmarshal(types.UnwrapTx(tx), cmd); err != nil {
 		return true, err
 	}
 	return false, nil
@@ -78,13 +79,11 @@ func (s *Specialop) DeliverTx(tx []byte, i int) (bool, error) {
 	if !types.IsSpecialOP(tx) {
 		return true, nil
 	}
-	var cmd types.SpecialOPCmd
-	err := wire.ReadBinaryBytes(types.UnwrapTx(tx), &cmd)
-	if err != nil || cmd.CmdCode != types.SpecialOP {
+	cmd := &types.SpecialOPCmd{}
+	if err := json.Unmarshal(types.UnwrapTx(tx), cmd); err != nil {
 		return true, err
 	}
-	err = s.ProcessSpecialOP(&cmd)
-	return false, err
+	return false, s.ProcessSpecialOP(cmd)
 }
 
 func (s *Specialop) BeginBlock(p *BeginBlockParams) (*BeginBlockReturns, error) {
@@ -144,105 +143,86 @@ func (s *Specialop) Reset() {
 	s.DeleteRefuseKeys = s.DeleteRefuseKeys[:0]
 }
 
-func (s *Specialop) CheckSpecialOP(cmd *types.SpecialOPCmd) (res error, sig crypto.Signature) {
-	nodePubKey, err := crypto.PubKeyFromBytes(cmd.NodePubKey)
-	if err != nil {
-		return err, s.privkey.Sign([]byte(err.Error()))
-	}
-	if !s.isValidatorPubKey(nodePubKey) {
-		err := errors.New("[CheckSpecialOP] only validators can issue special op")
-		return err, s.privkey.Sign([]byte(err.Error()))
+func (s *Specialop) SignSpecialOP(cmd *types.SpecialOPCmd) (sig crypto.SignatureEd25519, res error) {
+	nodePubKey := crypto.PubKeyEd25519{}
+	copy(nodePubKey[:], cmd.PubKey)
+	if !s.isCA(nodePubKey) {
+		err := errors.New("[SignSpecialOP] only CA can issue special op")
+		return crypto.SignatureEd25519{}, err
 	}
 
 	// verify all the signatures from cmd.sigs, return error if anything fails
-	for _, sig := range cmd.Sigs {
-		pk, err := crypto.PubKeyFromBytes(sig[:33])
-		if err != nil {
-			err := errors.New("fail to get pubkey from sigs")
-			return err, s.privkey.Sign([]byte(err.Error()))
-		}
-		pk32 := [32]byte(pk.(crypto.PubKeyEd25519))
-		signature, err := crypto.SignatureFromBytes(sig[33:])
-		if err != nil {
-			err := errors.New("fail to get signature from sigs")
-			return err, s.privkey.Sign([]byte(err.Error()))
-		}
-		sig64 := [64]byte(signature.(crypto.SignatureEd25519))
-		if !ed25519.Verify(&pk32, cmd.ExCmd, &sig64) {
-			err := errors.New("signature verification failed")
-			return err, s.privkey.Sign([]byte(err.Error()))
-		}
-	}
+	// for _, sig := range cmd.Sigs {
+	// 	pk32 := [32]byte{}
+	// 	copy(pk32[:], sig[:32])
+	// 	sig64 := [64]byte{}
+	// 	copy(sig64[:], sig[32:])
+	// 	if !ed25519.Verify(&pk32, cmd.Msg, &sig64) {
+	// 		err := errors.New("signature verification failed")
+	// 		return crypto.SignatureEd25519{}, err
+	// 	}
+	// }
 
 	switch cmd.CmdType {
 	case types.SpecialOP_ChangeValidator:
-		_, err := s.ParseValidator(cmd.Msg)
+		_, err := s.ParseValidator(cmd)
 		if err != nil {
-			return err, s.privkey.Sign([]byte(err.Error()))
+			return crypto.SignatureEd25519{}, err
 		}
-		return nil, s.privkey.Sign(cmd.ExCmd)
+		return s.privkey.Sign(cmd.Msg).(crypto.SignatureEd25519), nil
 	case types.SpecialOP_Disconnect,
 		types.SpecialOP_AddRefuseKey,
 		types.SpecialOP_DeleteRefuseKey:
-		return nil, s.privkey.Sign(cmd.ExCmd)
+		return s.privkey.Sign(cmd.Msg).(crypto.SignatureEd25519), nil
 	default:
 		err := errors.New("unknown special op")
-		return err, s.privkey.Sign([]byte(err.Error()))
+		return crypto.SignatureEd25519{}, err
 	}
 }
 
 func (s *Specialop) ProcessSpecialOP(cmd *types.SpecialOPCmd) error {
-	nodePubKey, err := crypto.PubKeyFromBytes(cmd.NodePubKey)
-	if err != nil {
-		return err
-	}
-	if !s.isValidatorPubKey(nodePubKey) {
-		return errors.New("[ProcessSpecialOP] only validators can issue special op")
+	nodePubKey := crypto.PubKeyEd25519{}
+	copy(nodePubKey[:], cmd.PubKey)
+
+	if !s.isCA(nodePubKey) {
+		return errors.New("[ProcessSpecialOP] only CA can issue special op")
 	}
 	if !s.CheckMajor23(cmd) {
 		return errors.New("need more than 2/3 total voting power")
 	}
 	switch cmd.CmdType {
 	case types.SpecialOP_ChangeValidator:
-		validator, err := s.ParseValidator(cmd.Msg)
+		validator, err := s.ParseValidator(cmd)
 		if err != nil {
 			return err
-		}
-		if validator == nil {
-			return errors.New("change validator nil")
 		}
 		s.ChangedValidators = append(s.ChangedValidators, validator)
 	case types.SpecialOP_Disconnect:
 		sw := *(s.sw)
 		peers := sw.Peers().List()
-		msgPubKey, err := crypto.PubKeyFromBytes(cmd.Msg)
-		if err != nil {
-			return errors.New("disconnect msg should contain the target peer's pubkey")
-		}
+		msgPubKey := crypto.PubKeyEd25519{}
+		copy(msgPubKey[:], cmd.Msg)
 		if (*s.validators).HasAddress(msgPubKey.Address()) {
 			_, v := (*s.validators).GetByAddress(msgPubKey.Address())
-			s.ChangedValidators = append(s.ChangedValidators, &types.ValidatorAttr{Power: 0, IsCA: v.IsCA, RPCAddress: v.RPCAddress, PubKey: v.PubKey.Bytes()})
+			pk := v.PubKey.(crypto.PubKeyEd25519)
+			s.ChangedValidators = append(s.ChangedValidators, &types.ValidatorAttr{Power: 0, IsCA: v.IsCA, PubKey: pk[:]})
 		}
 		for _, peer := range peers {
-			if peer.NodeInfo.PubKey == msgPubKey.(crypto.PubKeyEd25519) {
+			if peer.NodeInfo.PubKey == msgPubKey {
 				s.DisconnectedPeers = append(s.DisconnectedPeers, peer)
 				break
 			}
 		}
-		s.AddRefuseKeys = append(s.AddRefuseKeys, msgPubKey.(crypto.PubKeyEd25519))
+		s.AddRefuseKeys = append(s.AddRefuseKeys, [32]byte(msgPubKey))
 		return nil
 	case types.SpecialOP_AddRefuseKey:
-		msgPubKey, err := crypto.PubKeyFromBytes(cmd.Msg)
-		if err != nil {
-			return errors.New("invalid peer pubkey")
-		}
-		s.AddRefuseKeys = append(s.AddRefuseKeys, msgPubKey.(crypto.PubKeyEd25519))
+		msgPubKey := crypto.PubKeyEd25519{}
+		copy(msgPubKey[:], cmd.Msg)
+		s.AddRefuseKeys = append(s.AddRefuseKeys, [32]byte(msgPubKey))
 	case types.SpecialOP_DeleteRefuseKey:
-		msgPubKey, err := crypto.PubKeyFromBytes(cmd.Msg)
-		if err != nil {
-			return errors.New("invalid peer pubkey")
-		}
-		s.DeleteRefuseKeys = append(s.DeleteRefuseKeys, msgPubKey.(crypto.PubKeyEd25519))
+		msgPubKey := crypto.PubKeyEd25519{}
+		copy(msgPubKey[:], cmd.Msg)
+		s.DeleteRefuseKeys = append(s.DeleteRefuseKeys, [32]byte(msgPubKey))
 	default:
 		return errors.New("unsupported special operation")
 	}
@@ -252,52 +232,52 @@ func (s *Specialop) ProcessSpecialOP(cmd *types.SpecialOPCmd) error {
 
 func (s *Specialop) CheckMajor23(cmd *types.SpecialOPCmd) bool {
 	var major23 int64
-	for _, validator := range (*s.validators).Validators {
-		for _, sig := range cmd.Sigs {
-			sigPubKey, err := crypto.PubKeyFromBytes(sig[:33])
-			if err == nil && validator.PubKey.Equals(sigPubKey) {
-				valPubKey := [32]byte(validator.PubKey.(crypto.PubKeyEd25519))
-				signature, err := crypto.SignatureFromBytes(sig[33:])
-				if err != nil {
-					fmt.Println(err)
-				}
-				sigByte64 := [64]byte(signature.(crypto.SignatureEd25519))
-				if ed25519.Verify(&valPubKey, cmd.ExCmd, &sigByte64) {
-					major23 += validator.VotingPower
-				}
-				break
+	for _, sig := range cmd.Sigs {
+		sigPubKey := crypto.PubKeyEd25519{}
+		copy(sigPubKey[:], sig[:32])
+		if (*s.validators).HasAddress(sigPubKey.Address()) {
+			_, validator := (*s.validators).GetByAddress(sigPubKey.Address())
+			pubKey32 := [32]byte(sigPubKey)
+			sig64 := [64]byte{}
+			copy(sig64[:], sig[32:])
+			if ed25519.Verify(&pubKey32, cmd.Msg, &sig64) {
+				major23 += validator.VotingPower
+			} else {
+				s.logger.Info("check major 2/3", zap.String("vote nil", fmt.Sprintf("%X", pubKey32)))
 			}
 		}
 	}
+
 	return major23 > (*s.validators).TotalVotingPower()*2/3
 }
 
-func (s *Specialop) ParseValidator(msg []byte) (*types.ValidatorAttr, error) {
-	var validator = new(types.ValidatorAttr)
-	if err := wire.ReadJSONBytes(msg, validator); err != nil {
+func (s *Specialop) ParseValidator(cmd *types.SpecialOPCmd) (*types.ValidatorAttr, error) {
+	validator := &types.ValidatorAttr{}
+	data, err := cmd.ExtractMsg(validator)
+	if err != nil {
 		return nil, err
+	}
+	validator, ok := data.(*types.ValidatorAttr)
+	if !ok {
+		return nil, errors.New("change validator nil")
 	}
 	return validator, nil
 }
 
 func (s *Specialop) isValidatorPubKey(pubkey crypto.PubKey) bool {
-	isV := false
-	for _, v := range (*s.validators).Validators {
-		if pubkey.Equals(v.PubKey) {
-			isV = true
-			break
-		}
-	}
-	return isV
+	return (*s.validators).HasAddress(pubkey.Address())
+}
+
+func (s *Specialop) isCA(pubkey crypto.PubKey) bool {
+	_, v := (*s.validators).GetByAddress(pubkey.Address())
+	return v != nil && v.IsCA
 }
 
 func (s *Specialop) updateValidators(validators *types.ValidatorSet, changedValidators []*types.ValidatorAttr) error {
 	// TODO: prevent change of 1/3+ at once
 	for _, v := range changedValidators {
-		pubkey, err := crypto.PubKeyFromBytes(v.PubKey) // NOTE: expects go-wire encoded pubkey
-		if err != nil {
-			return err
-		}
+		pubkey := crypto.PubKeyEd25519{}
+		copy(pubkey[:], v.PubKey)
 		address := pubkey.Address()
 		power := int64(v.Power)
 		// mind the overflow from uint64
@@ -309,7 +289,7 @@ func (s *Specialop) updateValidators(validators *types.ValidatorSet, changedVali
 		if val == nil {
 			// add val
 			// TODO: check if validator node really exists
-			added := validators.Add(types.NewValidator(pubkey, power, v.IsCA, v.RPCAddress))
+			added := validators.Add(types.NewValidator(pubkey, power, v.IsCA))
 			if !added {
 				return fmt.Errorf("Failed to add new validator %X with voting power %d", address, power)
 			}

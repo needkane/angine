@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/blockchain"
@@ -34,10 +35,10 @@ import (
 	"github.com/annchain/angine/plugin"
 	"github.com/annchain/angine/refuse_list"
 	"github.com/annchain/angine/state"
+	"github.com/annchain/angine/trace"
 	"github.com/annchain/angine/types"
 	"github.com/annchain/ann-module/lib/ed25519"
 	cmn "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 	crypto "github.com/annchain/ann-module/lib/go-crypto"
 	dbm "github.com/annchain/ann-module/lib/go-db"
 	"github.com/annchain/ann-module/lib/go-events"
@@ -64,6 +65,7 @@ type (
 		blockstore    *blockchain.BlockStore
 		mempool       *mempool.Mempool
 		consensus     *consensus.ConsensusState
+		traceRouter   *trace.Router
 		stateMachine  *state.State
 		p2pSwitch     *p2p.Switch
 		eventSwitch   *types.EventSwitch
@@ -71,6 +73,7 @@ type (
 		p2pHost       string
 		p2pPort       uint16
 		genesis       *types.GenesisDoc
+		addrBook      *p2p.AddrBook
 
 		logger *zap.Logger
 
@@ -80,11 +83,11 @@ type (
 	// Tunes wraps two different kinds of configurations for angine
 	Tunes struct {
 		Runtime string
-		Conf    *cfg.MapConfig
+		Conf    *viper.Viper
 	}
 )
 
-// Defaults to tcp
+// ProtocolAndAddress accepts tcp by default
 func ProtocolAndAddress(listenAddr string) (string, string) {
 	protocol, address := "tcp", listenAddr
 	parts := strings.SplitN(address, "://", 2)
@@ -97,18 +100,19 @@ func ProtocolAndAddress(listenAddr string) (string, string) {
 // Initialize generates genesis.json and priv_validator.json automatically.
 // It is usually used with commands like "init" before user put the node into running.
 func Initialize(tune *Tunes) {
-	var conf *cfg.MapConfig
+	var conf *viper.Viper
 	if tune.Conf == nil {
 		conf = ac.GetConfig(tune.Runtime)
 	} else {
 		conf = tune.Conf
 	}
+	conf.AutomaticEnv()
+
 	priv := genPrivFile(conf.GetString("priv_validator_file"))
 	gvs := []types.GenesisValidator{types.GenesisValidator{
-		PubKey:     priv.PubKey,
-		Amount:     100,
-		IsCA:       true,
-		RPCAddress: conf.GetString("rpc_laddr"),
+		PubKey: priv.PubKey,
+		Amount: 100,
+		IsCA:   true,
 	}}
 	genDoc, err := genGenesiFile(conf.GetString("genesis_file"), gvs)
 	if err != nil {
@@ -121,12 +125,13 @@ func Initialize(tune *Tunes) {
 
 // NewAngine makes and returns a new angine, which can be used directly after being imported
 func NewAngine(lgr *zap.Logger, tune *Tunes) *Angine {
-	var conf *cfg.MapConfig
+	var conf *viper.Viper
 	if tune.Conf == nil {
 		conf = ac.GetConfig(tune.Runtime)
 	} else {
 		conf = tune.Conf
 	}
+	conf.AutomaticEnv()
 
 	dbBackend := conf.GetString("db_backend")
 	dbDir := conf.GetString("db_dir")
@@ -143,20 +148,19 @@ func NewAngine(lgr *zap.Logger, tune *Tunes) *Angine {
 	if err != nil {
 		gotGenesis = false
 	}
-	stateM, err := getOrMakeState(conf, stateDB, genesis)
-	if err != nil {
-		lgr.Error("angine error", zap.Error(err))
-		return nil
-	}
-
 	if gotGenesis {
 		conf.Set("chain_id", genesis.ChainID)
 	}
 	chainID := conf.GetString("chain_id")
-
 	logger, err := getLogger(conf, chainID)
 	if err != nil {
 		lgr.Error("fail to get logger", zap.Error(err))
+		return nil
+	}
+
+	stateM, err := getOrMakeState(logger, conf, stateDB, genesis)
+	if err != nil {
+		lgr.Error("angine error", zap.Error(err))
 		return nil
 	}
 
@@ -164,7 +168,7 @@ func NewAngine(lgr *zap.Logger, tune *Tunes) *Angine {
 	refuseList := refuse_list.NewRefuseList(dbBackend, dbDir)
 	eventSwitch := types.NewEventSwitch(logger)
 	if _, err := eventSwitch.Start(); err != nil {
-		logger.Error("fail to start event switch", zap.Error(err))
+		lgr.Error("fail to start event switch", zap.Error(err))
 		return nil
 	}
 
@@ -173,12 +177,16 @@ func NewAngine(lgr *zap.Logger, tune *Tunes) *Angine {
 		gb = wire.JSONBytes(genesis)
 	}
 	p2psw, err := prepareP2P(logger, conf, gb, privValidator, refuseList)
+	if err != nil {
+		lgr.Error("prepare p2p err", zap.Error(err))
+		return nil
+	}
 	p2pListener := p2psw.Listeners()[0]
 
 	if tune.Conf == nil {
 		tune.Conf = conf
 	} else if tune.Runtime == "" {
-		tune.Runtime = conf.GetString("datadir")
+		tune.Runtime = conf.GetString("runtime")
 	}
 	angine := &Angine{
 		Tune: tune,
@@ -211,7 +219,7 @@ func NewAngine(lgr *zap.Logger, tune *Tunes) *Angine {
 				return err
 			}
 			angine.genesis = g
-			angine.assembleStateMachine(state.MakeGenesisState(stateDB, g))
+			angine.assembleStateMachine(state.MakeGenesisState(logger, stateDB, g))
 			// here we defer the Start of reactors when we really have them
 			for _, r := range angine.p2pSwitch.Reactors() {
 				if _, err := r.Start(); err != nil {
@@ -259,20 +267,29 @@ func (ang *Angine) assembleStateMachine(stateM *state.State) {
 		return nil
 	})
 
+	spRouter := trace.NewRouter(ang.logger, conf, stateM, ang.PrivValidator())
+	spReactor := trace.NewTraceReactor(ang.logger, conf, spRouter)
+	spRouter.SetReactor(spReactor)
+	spRouter.RegisterHandler(trace.SpecialOPChannel, ang.SpecialOPResponseHandler)
+
 	privKey := ang.privValidator.GetPrivateKey()
 
 	ang.p2pSwitch.AddReactor("MEMPOOL", memReactor)
 	ang.p2pSwitch.AddReactor("BLOCKCHAIN", bcReactor)
 	ang.p2pSwitch.AddReactor("CONSENSUS", consensusReactor)
+	ang.p2pSwitch.AddReactor("SPECIALOP", spReactor)
 
+	var addrBook *p2p.AddrBook
 	if conf.GetBool("pex_reactor") {
-		addrBook := p2p.NewAddrBook(ang.logger, conf.GetString("addrbook_file"), conf.GetBool("addrbook_strict"))
+		addrBook = p2p.NewAddrBook(ang.logger, conf.GetString("addrbook_file"), conf.GetBool("addrbook_strict"))
 		addrBook.Start()
 		pexReactor := p2p.NewPEXReactor(ang.logger, addrBook)
 		ang.p2pSwitch.AddReactor("PEX", pexReactor)
 	}
 
-	ang.p2pSwitch.SetAuthByCA(authByCA(stateM.ChainID, &stateM.Validators, ang.logger))
+	if conf.GetBool("auth_by_ca") {
+		ang.p2pSwitch.SetAuthByCA(authByCA(conf, stateM.ChainID, &stateM.Validators, ang.logger))
+	}
 
 	setEventSwitch(*ang.eventSwitch, bcReactor, memReactor, consensusReactor)
 	initCorePlugins(stateM, privKey.(crypto.PrivKeyEd25519), ang.p2pSwitch, &stateM.Validators, ang.refuseList)
@@ -280,11 +297,9 @@ func (ang *Angine) assembleStateMachine(stateM *state.State) {
 	ang.blockstore = blockStore
 	ang.consensus = consensusState
 	ang.mempool = mem
+	ang.traceRouter = spRouter
 	ang.stateMachine = stateM
-}
-
-func (ang *Angine) SetSpecialVoteRPC(f func([]byte, *types.Validator) ([]byte, error)) {
-	ang.getSpecialVote = f
+	ang.addrBook = addrBook
 }
 
 func (ang *Angine) ConnectApp(app types.Application) error {
@@ -382,7 +397,7 @@ func (ang *Angine) P2PPort() uint16 {
 }
 
 func (ang *Angine) DialSeeds(seeds []string) {
-	ang.p2pSwitch.DialSeeds(seeds)
+	ang.p2pSwitch.DialSeeds(ang.addrBook, seeds)
 }
 
 func (ang *Angine) Start() error {
@@ -429,6 +444,10 @@ func (ang *Angine) Height() int {
 	return ang.blockstore.Height()
 }
 
+func (ang *Angine) NonEmptyHeight() int {
+	return ang.stateMachine.LastNonEmptyHeight
+}
+
 func (ang *Angine) GetBlock(height int) (*types.Block, *types.BlockMeta) {
 	if height == 0 {
 		return nil, nil
@@ -436,31 +455,44 @@ func (ang *Angine) GetBlock(height int) (*types.Block, *types.BlockMeta) {
 	return ang.blockstore.LoadBlock(height), ang.blockstore.LoadBlockMeta(height)
 }
 
+func (ang *Angine) GetNonEmptyBlockIterator() *blockchain.NonEmptyBlockIterator {
+	return blockchain.NewNonEmptyBlockIterator(ang.blockstore)
+}
+
 func (ang *Angine) BroadcastTx(tx []byte) error {
 	return ang.mempool.CheckTx(tx)
 }
 
-func (ang *Angine) BroadcastTxCommit(tx []byte) error {
-	if err := ang.mempool.CheckTx(tx); err != nil {
-		return err
+func (e *Angine) BroadcastTxCommit(tx []byte) (*types.ResultBroadcastTxCommit, error) {
+	if err := e.mempool.CheckTx(tx); err != nil {
+		return nil, err
 	}
 	committed := make(chan types.EventDataTx, 1)
 	eventString := types.EventStringTx(tx)
 	timer := time.NewTimer(60 * 2 * time.Second)
-	types.AddListenerForEvent(*ang.eventSwitch, "angine", eventString, func(data types.TMEventData) {
+	types.AddListenerForEvent(*e.eventSwitch, "angine", eventString, func(data types.TMEventData) {
 		committed <- data.(types.EventDataTx)
 	})
 	defer func() {
-		(*ang.eventSwitch).(events.EventSwitch).RemoveListenerForEvent(eventString, "angine")
+		(*e.eventSwitch).(events.EventSwitch).RemoveListenerForEvent(eventString, "angine")
 	}()
 	select {
-	case res := <-committed:
-		if res.Code == types.CodeType_OK {
-			return nil
+	case c := <-committed:
+		if c.Code == types.CodeType_OK {
+			return &types.ResultBroadcastTxCommit{
+				Code: c.Code,
+				Data: c.Data,
+				Log:  c.Log,
+			}, nil
 		}
-		return fmt.Errorf(res.Error)
+		res := new(types.Result).FromJSON(c.Error)
+		return &types.ResultBroadcastTxCommit{
+			Code: res.Code,
+			Data: res.Data,
+			Log:  res.Log,
+		}, nil
 	case <-timer.C:
-		return fmt.Errorf("Timed out waiting for transaction to be included in a block")
+		return nil, fmt.Errorf("Timed out waiting for transaction to be included in a block")
 	}
 }
 
@@ -514,9 +546,9 @@ func (ang *Angine) GetUnconfirmedTxs() []types.Tx {
 	return ang.mempool.Reap(-1)
 }
 
-func (ang *Angine) IsNodeValidator(pub crypto.PubKey) bool {
+func (e *Angine) IsNodeValidator(pub crypto.PubKey) bool {
 	edPub := pub.(crypto.PubKeyEd25519)
-	_, vals := ang.consensus.GetValidators()
+	_, vals := e.consensus.GetValidators()
 	for _, v := range vals {
 		if edPub.KeyString() == v.PubKey.KeyString() {
 			return true
@@ -665,14 +697,20 @@ func refuseListFilter(refuseList *refuse_list.RefuseList) func(crypto.PubKeyEd25
 	}
 }
 
-func authByCA(chainID string, ppValidators **types.ValidatorSet, log *zap.Logger) func(*p2p.NodeInfo) error {
+func authByCA(conf *viper.Viper, chainID string, ppValidators **types.ValidatorSet, log *zap.Logger) func(*p2p.NodeInfo) error {
 	valset := *ppValidators
 	chainIDBytes := []byte(chainID)
 	return func(peerNodeInfo *p2p.NodeInfo) error {
+		// validator node must be signed by CA
+		// but normal node can bypass auth check if config says so
+		if !valset.HasAddress(peerNodeInfo.PubKey.Address()) && !conf.GetBool("non_validator_node_auth") {
+			return nil
+		}
 		msg := append(peerNodeInfo.PubKey[:], chainIDBytes...)
 		for _, val := range valset.Validators {
+			// only CA
 			if !val.IsCA {
-				continue // CA must be validator
+				continue
 			}
 			valPk := [32]byte(val.PubKey.(crypto.PubKeyEd25519))
 			signedPkByte64, err := types.StringTo64byte(peerNodeInfo.SigndPubKey)
@@ -702,7 +740,7 @@ func initCorePlugins(sm *state.State, privkey crypto.PrivKeyEd25519, sw *p2p.Swi
 	}
 }
 
-func fastSyncable(conf cfg.Config, selfAddress []byte, validators *types.ValidatorSet) bool {
+func fastSyncable(conf *viper.Viper, selfAddress []byte, validators *types.ValidatorSet) bool {
 	// We don't fast-sync when the only validator is us.
 	fastSync := conf.GetBool("fast_sync")
 	if validators.Size() == 1 {
@@ -714,14 +752,14 @@ func fastSyncable(conf cfg.Config, selfAddress []byte, validators *types.Validat
 	return fastSync
 }
 
-func getGenesisFile(conf cfg.Config) (*types.GenesisDoc, error) {
+func getGenesisFile(conf *viper.Viper) (*types.GenesisDoc, error) {
 	genDocFile := conf.GetString("genesis_file")
 	if !cmn.FileExists(genDocFile) {
 		return nil, fmt.Errorf("missing genesis_file")
 	}
 	jsonBlob, err := ioutil.ReadFile(genDocFile)
 	if err != nil {
-		return nil, fmt.Errorf("Couldn't read GenesisDoc file: %v", err)
+		cmn.Exit(cmn.Fmt("Couldn't read GenesisDoc file: %v", err))
 	}
 	genDoc := types.GenesisDocFromJSON(jsonBlob)
 	if genDoc.ChainID == "" {
@@ -732,7 +770,7 @@ func getGenesisFile(conf cfg.Config) (*types.GenesisDoc, error) {
 	return genDoc, nil
 }
 
-func getLogger(conf cfg.Config, chainID string) (*zap.Logger, error) {
+func getLogger(conf *viper.Viper, chainID string) (*zap.Logger, error) {
 	logpath := conf.GetString("log_path")
 	if logpath == "" {
 		logpath, _ = os.Getwd()
@@ -763,14 +801,14 @@ func genGenesiFile(path string, gVals []types.GenesisValidator) (*types.GenesisD
 	return genDoc, genDoc.SaveAs(path)
 }
 
-func checkPrivValidatorFile(conf cfg.Config) error {
+func checkPrivValidatorFile(conf *viper.Viper) error {
 	if privFile := conf.GetString("priv_validator_file"); !cmn.FileExists(privFile) {
 		return fmt.Errorf("PrivValidator file needed: %s", privFile)
 	}
 	return nil
 }
 
-func checkGenesisFile(conf cfg.Config) error {
+func checkGenesisFile(conf *viper.Viper) error {
 	if genFile := conf.GetString("genesis_file"); !cmn.FileExists(genFile) {
 		return fmt.Errorf("Genesis file needed: %s", genFile)
 	}
@@ -788,11 +826,11 @@ func ensureQueryDB(dbDir string) (*dbm.GoLevelDB, error) {
 	return querydb, nil
 }
 
-func getOrMakeState(conf cfg.Config, stateDB dbm.DB, genesis *types.GenesisDoc) (*state.State, error) {
-	stateM := state.GetState(conf, stateDB)
+func getOrMakeState(logger *zap.Logger, conf *viper.Viper, stateDB dbm.DB, genesis *types.GenesisDoc) (*state.State, error) {
+	stateM := state.GetState(logger, conf, stateDB)
 	if stateM == nil {
 		if genesis != nil {
-			if stateM = state.MakeGenesisState(stateDB, genesis); stateM == nil {
+			if stateM = state.MakeGenesisState(logger, stateDB, genesis); stateM == nil {
 				return nil, fmt.Errorf("fail to get genesis state")
 			}
 		}
@@ -800,9 +838,9 @@ func getOrMakeState(conf cfg.Config, stateDB dbm.DB, genesis *types.GenesisDoc) 
 	return stateM, nil
 }
 
-func prepareP2P(logger *zap.Logger, conf cfg.Config, genesisBytes []byte, privValidator *types.PrivValidator, refuseList *refuse_list.RefuseList) (*p2p.Switch, error) {
-	p2psw := p2p.NewSwitch(logger, conf.GetConfig("p2p"), genesisBytes)
-	protocol, address := ProtocolAndAddress(conf.GetString("node_laddr"))
+func prepareP2P(logger *zap.Logger, conf *viper.Viper, genesisBytes []byte, privValidator *types.PrivValidator, refuseList *refuse_list.RefuseList) (*p2p.Switch, error) {
+	p2psw := p2p.NewSwitch(logger, conf, genesisBytes)
+	protocol, address := ProtocolAndAddress(conf.GetString("p2p_laddr"))
 	defaultListener, err := p2p.NewDefaultListener(logger, protocol, address, conf.GetBool("skip_upnp"))
 	if err != nil {
 		return nil, errors.Wrap(err, "prepareP2P")

@@ -35,38 +35,34 @@ type Validator struct {
 	VotingPower int64         `json:"voting_power"`
 	Accum       int64         `json:"accum"`
 	IsCA        bool          `json:"is_ca"`
-	RPCAddress  string        `json:"rpc"`
 }
 
 type ValidatorAttr struct {
-	PubKey     []byte `json:"pubKey,omitempty"`
-	Power      uint64 `json:"power,omitempty"`
-	RPCAddress string `json:"rPCAddress,omitempty"`
-	IsCA       bool   `json:"isCA,omitempty"`
+	PubKey []byte `json:"pubKey,omitempty"`
+	Power  uint64 `json:"power,omitempty"`
+	IsCA   bool   `json:"isCA,omitempty"`
 }
 
 func (m *ValidatorAttr) Reset() { *m = ValidatorAttr{} }
+
 func (m *ValidatorAttr) String() string {
-	return fmt.Sprintf("[%s,%s,%s,%s]", m.PubKey, m.Power, m.IsCA, m.RPCAddress)
+	return fmt.Sprintf("[%X,%v,%v]", m.PubKey, m.Power, m.IsCA)
 }
+
 func (m *ValidatorAttr) GetPubKey() []byte {
 	if m != nil {
 		return m.PubKey
 	}
 	return nil
 }
+
 func (m *ValidatorAttr) GetPower() uint64 {
 	if m != nil {
 		return m.Power
 	}
 	return 0
 }
-func (m *ValidatorAttr) GetRPCAddress() string {
-	if m != nil {
-		return m.RPCAddress
-	}
-	return ""
-}
+
 func (m *ValidatorAttr) GetIsCA() bool {
 	if m != nil {
 		return m.IsCA
@@ -74,14 +70,13 @@ func (m *ValidatorAttr) GetIsCA() bool {
 	return false
 }
 
-func NewValidator(pubKey crypto.PubKey, votingPower int64, isCA bool, rpcaddress string) *Validator {
+func NewValidator(pubKey crypto.PubKey, votingPower int64, isCA bool) *Validator {
 	return &Validator{
 		Address:     pubKey.Address(),
 		PubKey:      pubKey,
 		VotingPower: votingPower,
 		Accum:       0,
 		IsCA:        isCA,
-		RPCAddress:  rpcaddress,
 	}
 }
 
@@ -117,13 +112,12 @@ func (v *Validator) String() string {
 	if v == nil {
 		return "nil-Validator"
 	}
-	return fmt.Sprintf("Validator{%X %v VP:%v A:%v CA:%v RPC:%v}",
+	return fmt.Sprintf("Validator{%X %v VP:%v A:%v CA:%v}",
 		v.Address,
 		v.PubKey,
 		v.VotingPower,
 		v.Accum,
-		v.IsCA,
-		v.RPCAddress)
+		v.IsCA)
 }
 
 func (v *Validator) Hash() []byte {
@@ -160,6 +154,6 @@ func RandValidator(logger *zap.Logger, randPower bool, minPower int64) (*Validat
 	if randPower {
 		votePower += int64(RandUint32())
 	}
-	val := NewValidator(privVal.PubKey, votePower, true, "tcp://0.0.0.0:46657")
+	val := NewValidator(privVal.PubKey, votePower, true)
 	return val, privVal
 }

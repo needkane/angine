@@ -19,11 +19,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/types"
 	"github.com/annchain/ann-module/lib/go-clist"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 	"github.com/annchain/ann-module/lib/go-p2p"
 	"github.com/annchain/ann-module/lib/go-wire"
 )
@@ -38,13 +38,13 @@ const (
 // MempoolReactor handles mempool tx broadcasting amongst peers.
 type MempoolReactor struct {
 	p2p.BaseReactor
-	config  cfg.Config
+	config  *viper.Viper
 	Mempool *Mempool
 	evsw    types.EventSwitch
 	logger  *zap.Logger
 }
 
-func NewMempoolReactor(logger *zap.Logger, config cfg.Config, mempool *Mempool) *MempoolReactor {
+func NewMempoolReactor(logger *zap.Logger, config *viper.Viper, mempool *Mempool) *MempoolReactor {
 	memR := &MempoolReactor{
 		config:  config,
 		Mempool: mempool,
@@ -87,10 +87,10 @@ func (memR *MempoolReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte) {
 	case *TxMessage:
 		if err := memR.Mempool.CheckTx(msg.Tx); err != nil {
 			// Bad, seen, or conflicting tx.
-			memR.logger.Debug("Could not add tx", zap.ByteString("tx", msg.Tx))
+			memR.logger.Debug("Could not add tx", zap.ByteString("tx", msg.Tx.Hash()), zap.String("error", err.Error()))
 			return
 		}
-		memR.logger.Debug("Added valid tx", zap.ByteString("tx", msg.Tx))
+		// memR.logger.Debug("Added valid tx", zap.ByteString("tx", msg.Tx))
 		// broadcasting happens from go routines per peer
 	default:
 		memR.logger.Info(fmt.Sprintf("Unknown message type %T", msg))

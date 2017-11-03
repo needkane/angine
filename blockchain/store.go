@@ -254,3 +254,37 @@ func LoadBlockStoreStateJSON(db dbm.DB) BlockStoreStateJSON {
 	}
 	return bsj
 }
+
+type NonEmptyBlockIterator struct {
+	cursor     int
+	blockstore *BlockStore
+}
+
+func NewNonEmptyBlockIterator(store *BlockStore) *NonEmptyBlockIterator {
+	height := store.Height()
+	meta := store.LoadBlockMeta(height)
+	nonEmpty := 0
+	if meta.Header.NumTxs == 0 {
+		nonEmpty = meta.Header.LastNonEmptyHeight
+	} else {
+		nonEmpty = height
+	}
+
+	return &NonEmptyBlockIterator{
+		cursor:     nonEmpty,
+		blockstore: store,
+	}
+}
+
+func (i *NonEmptyBlockIterator) Next() *types.Block {
+	if i.cursor == 0 {
+		return nil
+	}
+	block := i.blockstore.LoadBlock(i.cursor)
+	i.cursor = block.LastNonEmptyHeight
+	return block
+}
+
+func (i *NonEmptyBlockIterator) HasMore() bool {
+	return i.cursor != 0
+}

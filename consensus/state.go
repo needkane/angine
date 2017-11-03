@@ -24,6 +24,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	bc "github.com/annchain/angine/blockchain"
@@ -31,7 +32,6 @@ import (
 	sm "github.com/annchain/angine/state"
 	"github.com/annchain/angine/types"
 	. "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 	"github.com/annchain/ann-module/lib/go-crypto"
 	"github.com/annchain/ann-module/lib/go-wire"
 )
@@ -73,7 +73,7 @@ func (tp *TimeoutParams) Commit(t time.Time) time.Time {
 }
 
 // InitTimeoutParamsFromConfig initializes parameters from config
-func InitTimeoutParamsFromConfig(config cfg.Config) *TimeoutParams {
+func InitTimeoutParamsFromConfig(config *viper.Viper) *TimeoutParams {
 	return &TimeoutParams{
 		Propose0:          config.GetInt("timeout_propose"),
 		ProposeDelta:      config.GetInt("timeout_propose_delta"),
@@ -243,7 +243,7 @@ type PrivValidator interface {
 type ConsensusState struct {
 	BaseService
 
-	config     cfg.Config
+	config     *viper.Viper
 	blockStore *bc.BlockStore
 	mempool    *mempl.Mempool
 
@@ -278,7 +278,7 @@ type ConsensusState struct {
 	slogger *zap.SugaredLogger
 }
 
-func NewConsensusState(logger *zap.Logger, config cfg.Config, state *sm.State, blockStore *bc.BlockStore, mempool *mempl.Mempool) *ConsensusState {
+func NewConsensusState(logger *zap.Logger, config *viper.Viper, state *sm.State, blockStore *bc.BlockStore, mempool *mempl.Mempool) *ConsensusState {
 	cs := &ConsensusState{
 		config:           config,
 		blockStore:       blockStore,
@@ -908,7 +908,7 @@ func (cs *ConsensusState) defaultDecideProposal(height, round int) {
 			cs.sendInternalMessage(msgInfo{&BlockPartMessage{cs.Height, cs.Round, part}, ""})
 		}
 		cs.slogger.Infof("Signed proposal height %d round %d proposal %v", height, round, proposal)
-		cs.slogger.Debugf("Signed proposal block: %v", block)
+		//cs.slogger.Debugf("Signed proposal block: %v", block)
 	} else {
 		if !cs.replayMode {
 			cs.logger.Warn("enterPropose: Error signing proposal", zap.Int("height", height), zap.Int("round", round), zap.String("error", err.Error()))
@@ -956,7 +956,7 @@ func (cs *ConsensusState) createProposalBlock() (block *types.Block, blockParts 
 	proposerPubkey, _ := cs.Validators.Proposer().PubKey.(crypto.PubKeyEd25519)
 
 	return types.MakeBlock(proposerPubkey[:], cs.Height, cs.state.ChainID, txs, commit,
-		cs.state.LastBlockID, cs.state.Validators.Hash(), cs.state.AppHash, cs.state.ReceiptsHash, cs.config.GetInt("block_part_size"))
+		cs.state.LastBlockID, cs.state.Validators.Hash(), cs.state.AppHash, cs.state.ReceiptsHash, cs.config.GetInt("block_part_size"), cs.state.LastNonEmptyHeight)
 }
 
 // Enter: `timeoutPropose` after entering Propose.
@@ -1265,7 +1265,7 @@ func (cs *ConsensusState) tryFinalizeCommit(height int) {
 // Increment height and goto RoundStepNewHeight
 func (cs *ConsensusState) finalizeCommit(height int) {
 	if cs.Height != height || cs.Step != RoundStepCommit {
-		cs.slogger.Debugf("finalizeCommit(%v): Invalid args. Current step: %v/%v/%v", height, cs.Height, cs.Round, cs.Step)
+		cs.slogger.Warn("finalizeCommit(%v): Invalid args. Current step: %v/%v/%v", height, cs.Height, cs.Round, cs.Step)
 		return
 	}
 	// logger.Info("ann-stopwatch consensusTime elapsed ", cs.RoundState.CommitTime.Sub(cs.RoundState.StartTime).String())
@@ -1287,7 +1287,7 @@ func (cs *ConsensusState) finalizeCommit(height int) {
 	}
 
 	cs.slogger.Infof("Finalizing commit of block with %d txs, height %d, hash %X, root %x", block.NumTxs, block.Height, block.Hash(), block.AppHash)
-	cs.slogger.Debugf("%v", block)
+	//cs.slogger.Debugf("%v", block)
 
 	// Save to blockStore.
 	if cs.blockStore.Height() < block.Height {
@@ -1474,7 +1474,7 @@ func (cs *ConsensusState) addVote(vote *types.Vote, peerKey string) (added bool,
 			switch vote.Type {
 			case types.VoteTypePrevote:
 				prevotes := cs.Votes.Prevotes(vote.Round)
-				cs.slogger.Debugw("Added to prevote", "vote", vote, "prevotes", prevotes.StringShort())
+				//cs.slogger.Debugw("Added to prevote", "vote", vote, "prevotes", prevotes.StringShort())
 				// First, unlock if prevotes is a valid POL.
 				// >> lockRound < POLRound <= unlockOrChangeLockRound (see spec)
 				// NOTE: If (lockRound < POLRound) but !(POLRound <= unlockOrChangeLockRound),

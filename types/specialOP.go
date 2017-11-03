@@ -16,6 +16,7 @@ package types
 
 import (
 	"bytes"
+	"encoding/json"
 	"time"
 )
 
@@ -24,15 +25,28 @@ var (
 )
 
 type SpecialOPCmd struct {
-	CmdCode      string    `json:"cmdcode"` //code for check if im a special
-	CmdType      string    `json:"cmdtype"` //type for what kind of specialOP
-	Msg          []byte    `json:"msg"`
-	Sigs         [][]byte  `json:"sigs"`
-	ExCmd        Tx        `json:"excmd"`
-	NodePubKey   []byte    `json:"node_pubkey"`
-	IssuerPubKey []byte    `json:"issuer_pubkey"`
-	Time         time.Time `json:"time"`
-	Nonce        uint64    `json:"nonce"`
+	CmdType   string    `json:"cmdtype"` //type for what kind of specialOP
+	Msg       []byte    `json:"msg"`
+	Sigs      [][]byte  `json:"sigs"`
+	Time      time.Time `json:"time"`
+	Nonce     uint64    `json:"nonce"`
+	PubKey    []byte    `json:"pubkey"`
+	Signature []byte    `json:"signature"`
+}
+
+func (cmd *SpecialOPCmd) LoadMsg(o interface{}) error {
+	var err error
+	if cmd.Msg, err = json.Marshal(o); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cmd *SpecialOPCmd) ExtractMsg(o interface{}) (interface{}, error) {
+	if err := json.Unmarshal(cmd.Msg, o); err != nil {
+		return nil, err
+	}
+	return o, nil
 }
 
 type CmdType string
@@ -54,4 +68,10 @@ func TagSpecialOPTx(tx []byte) []byte {
 
 func IsSpecialOP(tx []byte) bool {
 	return bytes.HasPrefix(tx, SpecialTag)
+}
+
+type SpecialVoteResult struct {
+	Result    []byte
+	PubKey    []byte
+	Signature []byte
 }

@@ -148,14 +148,19 @@ type ResultCoreVersion struct {
 	Hash       string `json:"hash"`
 }
 
+type ResultNonEmptyHeights struct {
+	Heights []int `json:"heights"`
+}
+
 //----------------------------------------
 // response & result types
 
 const (
 	// 0x0 bytes are for the blockchain
-	ResultTypeGenesis        = byte(0x01)
-	ResultTypeBlockchainInfo = byte(0x02)
-	ResultTypeBlock          = byte(0x03)
+	ResultTypeGenesis         = byte(0x01)
+	ResultTypeBlockchainInfo  = byte(0x02)
+	ResultTypeBlock           = byte(0x03)
+	ResultTypeNonEmptyHeights = byte(0x04)
 
 	// 0x2 bytes are for the network
 	ResultTypeStatus    = byte(0x20)
@@ -230,4 +235,5 @@ var _ = wire.RegisterInterface(
 	wire.ConcreteType{&ResultSurveillance{}, ResultTypeSurveillance},
 	wire.ConcreteType{&ResultRefuseList{}, ResultTypeRefuseList},
 	wire.ConcreteType{&ResultCoreVersion{}, ResultTypeCoreVersion},
+	wire.ConcreteType{&ResultNonEmptyHeights{}, ResultTypeNonEmptyHeights},
 )

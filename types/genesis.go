@@ -32,19 +32,24 @@ var GenDocKey = []byte("GenDocKey")
 // core types for a genesis definition
 
 type GenesisValidator struct {
-	PubKey     crypto.PubKey `json:"pub_key"`
-	Amount     int64         `json:"amount"`
-	Name       string        `json:"name"`
-	IsCA       bool          `json:"is_ca"`
-	RPCAddress string        `json:"rpc"`
+	PubKey crypto.PubKey `json:"pub_key"`
+	Amount int64         `json:"amount"`
+	Name   string        `json:"name"`
+	IsCA   bool          `json:"is_ca"`
 }
 
 type GenesisDoc struct {
-	GenesisTime time.Time          `json:"genesis_time"`
-	ChainID     string             `json:"chain_id"`
-	Validators  []GenesisValidator `json:"validators"`
-	AppHash     []byte             `json:"app_hash"`
-	Plugins     string             `json:"plugins"`
+	GenesisTime  time.Time          `json:"genesis_time"`
+	ChainID      string             `json:"chain_id"`
+	Validators   []GenesisValidator `json:"validators"`
+	AppHash      []byte             `json:"app_hash"`
+	Plugins      string             `json:"plugins"`
+	InitAccounts []InitInfo         `json:"init_accounts"`
+}
+
+type InitInfo struct {
+	StartingBalance string `json:"startingbalance"`
+	Address         string `json:"address"`
 }
 
 // Utility method for saving GenensisDoc as JSON file.
@@ -66,11 +71,10 @@ func GenesisDocFromJSON(jsonBlob []byte) (genState *GenesisDoc) {
 }
 
 type GenesisValidatorJson struct {
-	PubKey     [32]byte `json:"pub_key"`
-	Amount     int64    `json:"amount"`
-	Name       string   `json:"name"`
-	IsCA       bool     `json:"is_ca"`
-	RPCAddress string   `json:"rpc"`
+	PubKey [32]byte `json:"pub_key"`
+	Amount int64    `json:"amount"`
+	Name   string   `json:"name"`
+	IsCA   bool     `json:"is_ca"`
 }
 
 func (gv *GenesisValidator) UnmarshalJSON(b []byte) error {
@@ -82,6 +86,5 @@ func (gv *GenesisValidator) UnmarshalJSON(b []byte) error {
 	gv.IsCA = gj.IsCA
 	gv.Name = gj.Name
 	gv.PubKey = crypto.PubKeyEd25519(gj.PubKey)
-	gv.RPCAddress = gj.RPCAddress
 	return nil
 }

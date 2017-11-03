@@ -22,47 +22,44 @@ import (
 	"time"
 
 	"github.com/tendermint/tmlibs/db"
-	"go.uber.org/zap"
 
 	cmn "github.com/annchain/ann-module/lib/go-common"
-	"github.com/annchain/ann-module/lib/go-config"
-	"github.com/annchain/ann-module/lib/go-crypto"
 	"github.com/annchain/ann-module/lib/go-wire"
 )
 
 var lastBlockKey = []byte("lastblock")
 
 type Application interface {
+	GetAttributes() map[string]string
 	GetAngineHooks() Hooks
 	CompatibleWithAngine()
-	CheckTx([]byte) error
+	CheckTx([]byte) Result
 	Query([]byte) Result
 	Info() ResultInfo
 	Start() error
 	Stop()
-	SetCore(Core)
 	Initialized() bool
 }
 
-type AppMaker func(*zap.Logger, config.Config, crypto.PrivKey, Superior) Application
-
-// -------------- BaseApplication ---------------
-
+// BaseApplication defines the default save/load last block implementations
+// You can write all on your own, but embed this will save u some breath
 type BaseApplication struct {
 	Database         db.DB
 	InitializedState bool
 }
 
+// InitBaseApplication must be the first thing to be called when an application embeds BaseApplication
 func (ba *BaseApplication) InitBaseApplication(name string, datadir string) (err error) {
 	if ba.Database, err = db.NewGoLevelDB(name, datadir); err != nil {
 		return err
 	}
+	ba.InitializedState = true
 	return nil
 }
 
 func (ba *BaseApplication) LoadLastBlock(t interface{}) (res interface{}, err error) {
 	buf := ba.Database.Get(lastBlockKey)
-	if len(buf) != 0 {
+	if buf != nil && len(buf) != 0 {
 		r, n, err := bytes.NewReader(buf), new(int), new(error)
 		res = wire.ReadBinaryPtr(t, r, 0, n, err)
 		if *err != nil {
@@ -83,16 +80,17 @@ func (ba *BaseApplication) SaveLastBlock(lastBlock interface{}) {
 	ba.Database.SetSync(lastBlockKey, buf.Bytes())
 }
 
+// Initialized returns if a BaseApplication based app has been fully initialized
 func (ba *BaseApplication) Initialized() bool {
 	return ba.InitializedState
 }
 
+// Stop handles freeing resources taken by BaseApplication
 func (ba *BaseApplication) Stop() {
 	ba.Database.Close()
 }
 
-// ------------ CommApplication --------------
-
+// CommApplication defines an app with basic net io ability
 type CommApplication struct {
 	mtx      sync.Mutex
 	Listener net.Listener

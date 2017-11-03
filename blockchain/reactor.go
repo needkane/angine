@@ -21,11 +21,11 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/types"
 	. "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 	"github.com/annchain/ann-module/lib/go-p2p"
 	"github.com/annchain/ann-module/lib/go-wire"
 )
@@ -52,7 +52,7 @@ const (
 type BlockchainReactor struct {
 	p2p.BaseReactor
 
-	config     cfg.Config
+	config     *viper.Viper
 	store      *BlockStore
 	pool       *BlockPool
 	fastSync   bool
@@ -68,7 +68,7 @@ type BlockchainReactor struct {
 	logger *zap.Logger
 }
 
-func NewBlockchainReactor(logger *zap.Logger, config cfg.Config, lastBlockHeight int, store *BlockStore, fastSync bool) *BlockchainReactor {
+func NewBlockchainReactor(logger *zap.Logger, config *viper.Viper, lastBlockHeight int, store *BlockStore, fastSync bool) *BlockchainReactor {
 	if lastBlockHeight == store.Height()-1 {
 		store.height -= 1 // XXX HACK, make this better
 	}

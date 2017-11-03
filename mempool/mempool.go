@@ -20,13 +20,13 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/types"
 	auto "github.com/annchain/ann-module/lib/go-autofile"
 	"github.com/annchain/ann-module/lib/go-clist"
 	cmn "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 )
 
 const cacheSize = 100000
@@ -37,7 +37,7 @@ type IFilter interface {
 }
 
 type Mempool struct {
-	config  cfg.Config
+	config  *viper.Viper
 	mtx     sync.Mutex
 	txs     *clist.CList // concurrent linked-list of good txs
 	counter int64        // simple incrementing counter
@@ -55,7 +55,7 @@ type Mempool struct {
 	logger *zap.Logger
 }
 
-func NewMempool(logger *zap.Logger, config cfg.Config) *Mempool {
+func NewMempool(logger *zap.Logger, config *viper.Viper) *Mempool {
 	mempool := &Mempool{
 		config:  config,
 		txs:     clist.New(),
@@ -134,7 +134,6 @@ func (mem *Mempool) CheckTx(tx types.Tx) (err error) {
 		tx:      tx,
 	}
 	mem.txs.PushBack(memTx)
-
 	return nil
 }
 
@@ -200,6 +199,7 @@ func (mem *Mempool) refreshMempoolTxs(blockTxsMap map[string]struct{}) {
 			e.DetachPrev()
 			// mem.cache.Remove(memTx.tx)
 		}
+		mem.cache.Remove(memTx.tx)
 	}
 }
 

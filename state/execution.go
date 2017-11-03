@@ -16,13 +16,14 @@ package state
 
 import (
 	"errors"
+	"fmt"
 
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/annchain/angine/plugin"
 	"github.com/annchain/angine/types"
 	cmn "github.com/annchain/ann-module/lib/go-common"
-	cfg "github.com/annchain/ann-module/lib/go-config"
 )
 
 //--------------------------------------------------
@@ -145,7 +146,7 @@ func (s *State) ValidateBlock(block *types.Block) error {
 
 func (s *State) validateBlock(block *types.Block) error {
 	// Basic block validation.
-	err := block.ValidateBasic(s.ChainID, s.LastBlockHeight, s.LastBlockID, s.LastBlockTime, s.AppHash, s.ReceiptsHash)
+	err := block.ValidateBasic(s.ChainID, s.LastBlockHeight, s.LastBlockID, s.LastBlockTime, s.AppHash, s.ReceiptsHash, s.LastNonEmptyHeight)
 	if err != nil {
 		return err
 	}
@@ -192,7 +193,7 @@ func (s *State) ApplyBlock(eventSwitch types.EventSwitch, block *types.Block, pa
 // because state is typically reset on Commit and old txs must be replayed
 // against committed state before new txs are run in the mempool, lest they be invalid
 func (s *State) CommitStateUpdateMempool(eventSwitch types.EventSwitch, block *types.Block, mempool types.IMempool, round int) error {
-	mempool.Update(int64(block.Height), block.Txs)
+	mempool.Update(int64(block.Height), append(block.Txs, block.ExTxs...))
 	ed := types.NewEventDataHookCommit(block.Height, round, block)
 	types.FireEventHookCommit(eventSwitch, ed)
 	res := <-ed.ResCh
@@ -212,14 +213,14 @@ type BlockStore interface {
 }
 
 type Handshaker struct {
-	config cfg.Config
+	config *viper.Viper
 	state  *State
 	store  BlockStore
 
 	nBlocks int // number of blocks applied to the state
 }
 
-func NewHandshaker(config cfg.Config, state *State, store BlockStore) *Handshaker {
+func NewHandshaker(config *viper.Viper, state *State, store BlockStore) *Handshaker {
 	return &Handshaker{config, state, store, 0}
 }
 
@@ -255,7 +256,10 @@ func (s *State) execBeginBlockOnPlugins(block *types.Block) {
 func (s *State) deliverTxOnPlugins(tx []byte, i int) bool {
 	ret := true
 	for _, p := range s.Plugins {
-		passon, _ := p.DeliverTx(tx, i)
+		passon, err := p.DeliverTx(tx, i)
+		if err != nil {
+			fmt.Println(err)
+		}
 		ret = ret && passon
 	}
 	return ret

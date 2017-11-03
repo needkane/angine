@@ -976,7 +976,7 @@ func (ps *PeerState) SetHasVote(vote *types.Vote) {
 }
 
 func (ps *PeerState) setHasVote(height int, round int, type_ byte, index int) {
-	ps.slogger.Debugw("setHasVote(LastCommit)", "lastCommit", ps.LastCommit, "index", index)
+	//ps.slogger.Debugw("setHasVote(LastCommit)", "lastCommit", ps.LastCommit, "index", index)
 
 	// NOTE: some may be nil BitArrays -> no side effects.
 	ps.getVoteBitArray(height, round, type_).SetIndex(index, true)

@@ -18,15 +18,25 @@ const CONFIGTPL = `# This is a TOML config file.
 # For more information, see https://github.com/toml-lang/toml
 
 environment = "development"
-proxy_app = "tcp://127.0.0.1:46658"
-moniker = "__MONIKER__"
-node_laddr = "tcp://0.0.0.0:46656"
-seeds = ""
-fast_sync = true
 db_backend = "leveldb"
-rpc_laddr = "tcp://0.0.0.0:46657"
-api_laddr = "tcp://0.0.0.0:46659"
+moniker = "__MONIKER__"
+p2p_laddr = "tcp://0.0.0.0:46656"
+seeds = ""
+
+# auth by ca general switch
+auth_by_ca = true
+
+# whether non-validator nodes need auth by ca, only effective when auth_by_ca is true
+non_validator_auth_by_ca = true
+
+# auth signature from CA
 signbyCA = ""
+
+fast_sync = true
+
+skip_upnp = true
+
+log_path = ""
 
 #log_level:
 	# -1 DebugLevel logs are typically voluminous, and are usually disabled in production.
