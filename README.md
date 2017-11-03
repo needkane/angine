@@ -1,3 +1,11 @@
+[![API Reference](https://godoc.org/github.com/annchain/angine?status.svg)](https://godoc.org/github.com/annchain/angine)
+[![license](https://img.shields.io/github/license/annchain/angine.svg)](https://github.com/annchain/angine/blob/master/LICENSE)
+[![](https://tokei.rs/b1/github/annchain/angine?category=lines)](https://github.com/annchain/angine)
+
+
+Branch    | Buid Status | Coverage | Report Card
+----------|-------|----------|-------------
+master    | [![Build Status](https://travis-ci.org/annchain/angine.svg?branch=master)](https://travis-ci.org/annchain/angine)| [![master](http://codecov.io/gh/annchain/angine/branch/master/graph/badge.svg)](https://codecov.io/gh/annchain/angine) | [![Go Report Card](http://goreportcard.com/badge/github.com/annchain/angine/tree/master)](https://goreportcard.com/report/github.com/annchain/angine/tree/master)
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
 <div id="text-table-of-contents">
